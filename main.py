@@ -2,7 +2,7 @@ import argparse
 import os
 import numpy as np
 import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM, AutoProcessor
 
 from lib.prune import prune_wanda, prune_sparsegpt, prune_magnitude, prune_wanda_ww, prune_sparsegpt_ww, prune_magnitude_ww, check_sparsity 
 from lib.eval import eval_ppl, eval_zero_shot
@@ -15,10 +15,11 @@ def get_llm(model, cache_dir="llm_weights"):
         torch_dtype = torch.float16,
         cache_dir = cache_dir,
         low_cpu_mem_usage=True,
-        device_map = "auto"
+        device_map = "auto",
+        trust_remote_code=True,
     )
-    
-    model.seqlen = 2048
+
+    model.seqlen = getattr(model.config, "max_position_embeddings", 2048)
     return model
 
 
@@ -35,7 +36,8 @@ def main():
     parser.add_argument('--save', type=str, default=None, help='Path to save results')
     parser.add_argument('--save_model', type=str, default=None, help='Path to save the pruned model.')
     parser.add_argument('--use_variant', action="store_true", help="whether to use the wanda variant described in the wanda paper appendix")
-    
+    parser.add_argument('--calib_dataset', type=str, default="c4", help='Calibration dataset name')
+
     # params for WW
     parser.add_argument("--ww_metric", default="alpha_peak", type=str, help="the WW-based metric to ues.")
     parser.add_argument("--ww_metric_cache", default="./data/llama-7b-hf")
@@ -66,7 +68,15 @@ def main():
     if args.sparsity_type != "unstructured":
         prune_n, prune_m = map(int, args.sparsity_type.split(":"))
     
-    tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=False)
+    processor = None
+    if "qwen2.5-vl" in args.model.lower():
+        processor = AutoProcessor.from_pretrained(args.model, trust_remote_code=True)
+        # default to multi-modal captions for calibration unless user overrides
+        if args.calib_dataset == "c4":
+            args.calib_dataset = "pokemon_blip_captions"
+        tokenizer = processor.tokenizer
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=False)
     
     device = torch.device("cuda:0")
     if "30b" in args.model or "65b" in args.model or "70b" in args.model in args.model: # for 30b or 65b or 70b, we use device_map to load onto multiple GPUs, thus the processing here.
@@ -77,24 +87,24 @@ def main():
         print("pruning starts")
         # Uniform pruning
         if args.prune_method == "wanda":
-            prune_wanda(args, model, tokenizer, device, prune_n=prune_n, prune_m=prune_m)
+            prune_wanda(args, model, tokenizer, device, prune_n=prune_n, prune_m=prune_m, processor=processor)
 
         elif args.prune_method == "magnitude":
             prune_magnitude(args, model, tokenizer, device, prune_n=prune_n, prune_m=prune_m)
 
         elif args.prune_method == "sparsegpt":
-            prune_sparsegpt(args, model, tokenizer, device, prune_n=prune_n, prune_m=prune_m)
+            prune_sparsegpt(args, model, tokenizer, device, prune_n=prune_n, prune_m=prune_m, processor=processor)
 
         ################################################
         # Pruning with our layerwise pruning ratios
         elif args.prune_method == "wanda_ww":
-            prune_wanda_ww(args, model, tokenizer, device)
+            prune_wanda_ww(args, model, tokenizer, device, processor=processor)
 
         elif args.prune_method == "magnitude_ww":
-            prune_magnitude_ww(args, model, tokenizer, device)
+            prune_magnitude_ww(args, model, tokenizer, device, processor=processor)
 
         elif args.prune_method == "sparsegpt_ww":
-            prune_sparsegpt_ww(args, model, tokenizer, device)
+            prune_sparsegpt_ww(args, model, tokenizer, device, processor=processor)
             
     sparsity_ratio = check_sparsity(model)
     

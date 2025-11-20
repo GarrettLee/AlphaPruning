@@ -4,13 +4,25 @@ import torch
 import torch.nn as nn
 from .sparsegpt import SparseGPT 
 from .layerwrapper import WrappedGPT
-from .data import get_loaders 
+from .data import get_loaders
 import numpy as np
 from collections import defaultdict
 
 import os
 
 from .utils import get_weights, get_modules
+
+
+def get_transformer_layers(model):
+    if hasattr(model, "model") and hasattr(model.model, "decoder"):
+        return model.model.decoder.layers
+    if hasattr(model, "model") and hasattr(model.model, "layers"):
+        return model.model.layers
+    if hasattr(model, "language_model") and hasattr(model.language_model, "model"):
+        inner_model = model.language_model.model
+        if hasattr(inner_model, "layers"):
+            return inner_model.layers
+    raise AttributeError("Unable to locate transformer layers on the provided model.")
 
 
 def find_layers(module, layers=[nn.Linear], name=''):
@@ -36,14 +48,10 @@ def find_layers(module, layers=[nn.Linear], name=''):
     return res
 
 def check_sparsity(model):
-    use_cache = model.config.use_cache 
-    model.config.use_cache = False 
+    use_cache = model.config.use_cache
+    model.config.use_cache = False
 
-
-    if "OPT" in model.__class__.__name__:
-        layers = model.model.decoder.layers
-    else:    
-        layers = model.model.layers  
+    layers = get_transformer_layers(model)
         
         
     count = 0 
@@ -67,8 +75,16 @@ def check_sparsity(model):
     model.config.use_cache = use_cache 
     return float(count)/total_params 
 
+def _to_device(batch, device):
+    if isinstance(batch, dict):
+        return {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in batch.items()}
+    if torch.is_tensor(batch):
+        return batch.to(device)
+    return batch
+
+
 def prepare_calibration_input(model, dataloader, device):
-    layers = model.model.layers
+    layers = get_transformer_layers(model)
 
     # dev = model.hf_device_map["model.embed_tokens"]
     if "model.embed_tokens" in model.hf_device_map:
@@ -92,9 +108,14 @@ def prepare_calibration_input(model, dataloader, device):
     layers[0] = Catcher(layers[0])
     for batch in dataloader:
         try:
-            model(batch[0].to(device))
+            current_batch = batch if isinstance(batch, dict) else batch[0]
+            current_batch = _to_device(current_batch, device)
+            if isinstance(current_batch, dict):
+                model(**current_batch)
+            else:
+                model(current_batch)
         except ValueError:
-            pass 
+            pass
 
     layers[0] = layers[0].module
     torch.cuda.empty_cache()
@@ -105,7 +126,7 @@ def prepare_calibration_input(model, dataloader, device):
     return inps, outs, attention_mask, position_ids
 
 def prepare_calibration_input_opt(model, dataloader, device):
-    layers = model.model.decoder.layers
+    layers = get_transformer_layers(model)
     
     if "model.embed_tokens" in model.hf_device_map:
         device = model.hf_device_map["model.embed_tokens"]
@@ -128,9 +149,14 @@ def prepare_calibration_input_opt(model, dataloader, device):
     layers[0] = Catcher(layers[0])
     for batch in dataloader:
         try:
-            model(batch[0].to(device))
+            current_batch = batch if isinstance(batch, dict) else batch[0]
+            current_batch = _to_device(current_batch, device)
+            if isinstance(current_batch, dict):
+                model(**current_batch)
+            else:
+                model(current_batch)
         except ValueError:
-            pass 
+            pass
         
     layers[0] = layers[0].module
     torch.cuda.empty_cache()
@@ -150,10 +176,7 @@ def return_given_alpha(alpha, sort_res, W_metric, tmp_metric, sum_before):
 
 
 def ww_sparsity(args, model, device=torch.device("cuda:0"), s1=0.8, s2=1.2, ratios=None, prune_n=0, prune_m=0):
-    if "opt" in args.model:
-        blocks = model.model.decoder.layers    
-    else:
-        blocks = model.model.layers
+    blocks = get_transformer_layers(model)
     
     layers = [find_layers(blocks)]
     prunables = []
@@ -189,10 +212,7 @@ def ww_sparsity(args, model, device=torch.device("cuda:0"), s1=0.8, s2=1.2, rati
 #########################################################################################################################
 
 def prune_magnitude(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0, prune_m=0, ratios=None):
-    if "OPT" in model.__class__.__name__:
-        layers = model.model.decoder.layers
-    else:    
-        layers = model.model.layers
+    layers = get_transformer_layers(model)
     
     layer_num = len(find_layers(layers))
     if ratios is None:
@@ -214,12 +234,12 @@ def prune_magnitude(args, model, tokenizer, device=torch.device("cuda:0"), prune
             W[W_mask] = 0
     
 
-def prune_wanda(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0, prune_m=0, ratios=None):
+def prune_wanda(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0, prune_m=0, ratios=None, processor=None):
     use_cache = model.config.use_cache 
     model.config.use_cache = False 
 
     print("loading calibdation data")
-    dataloader, _ = get_loaders("c4",nsamples=args.nsamples,seed=args.seed,seqlen=model.seqlen,tokenizer=tokenizer)
+    dataloader, _ = get_loaders(args.calib_dataset,nsamples=args.nsamples,seed=args.seed,seqlen=model.seqlen,tokenizer=tokenizer, processor=processor)
     print("dataset loading complete")
     with torch.no_grad():
         if "OPT" in model.__class__.__name__:
@@ -230,10 +250,7 @@ def prune_wanda(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0
 
     print ("inps",inps)
 
-    if "OPT" in model.__class__.__name__:
-        layers = model.model.decoder.layers
-    else:    
-        layers = model.model.layers
+    layers = get_transformer_layers(model)
     
     layer_num = len(find_layers(layers))
     if ratios is None:
@@ -323,13 +340,13 @@ def prune_wanda(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0
 
 
 @torch.no_grad()
-def prune_sparsegpt(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0, prune_m=0, ratios=None):
+def prune_sparsegpt(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0, prune_m=0, ratios=None, processor=None):
     ## SparseGPT code available at: https://github.com/IST-DASLab/sparsegpt/tree/f5c25005a61f96a0933ca2f95705a963585aafaa
     print('Starting ...')
     use_cache = model.config.use_cache
     model.config.use_cache = False
     
-    dataloader, _ = get_loaders("c4",nsamples=args.nsamples,seed=args.seed,seqlen=model.seqlen,tokenizer=tokenizer)
+    dataloader, _ = get_loaders(args.calib_dataset,nsamples=args.nsamples,seed=args.seed,seqlen=model.seqlen,tokenizer=tokenizer, processor=processor)
     
     with torch.no_grad():
         if "OPT" in model.__class__.__name__:
@@ -337,10 +354,7 @@ def prune_sparsegpt(args, model, tokenizer, device=torch.device("cuda:0"), prune
         else:
             inps, outs, attention_mask, position_ids = prepare_calibration_input(model, dataloader, device)
 
-    if "OPT" in model.__class__.__name__:
-        layers = model.model.decoder.layers
-    else:    
-        layers = model.model.layers        
+    layers = get_transformer_layers(model)
     
     
     layer_num = len(find_layers(layers))
@@ -403,27 +417,27 @@ def prune_sparsegpt(args, model, tokenizer, device=torch.device("cuda:0"), prune
     torch.cuda.empty_cache()
 
 ###############################################################################################################
-def prune_magnitude_ww(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0, prune_m=0):
+def prune_magnitude_ww(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0, prune_m=0, processor=None):
     s1 = 1.0 - args.epsilon
     s2 = 1.0 + args.epsilon
     
     all_layer_ratio = ww_sparsity(args, model, device, s1, s2)
     # magnitude pruning
     prune_magnitude(args, model, tokenizer, device, ratios=all_layer_ratio)
-    
 
-def prune_wanda_ww(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0, prune_m=0):
+
+def prune_wanda_ww(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0, prune_m=0, processor=None):
     s1 = 1.0 - args.epsilon
     s2 = 1.0 + args.epsilon
 
     all_layer_ratio = ww_sparsity(args, model, device, s1, s2)
     # wanda pruning
-    prune_wanda(args, model, tokenizer, device, ratios=all_layer_ratio)
-    
-def prune_sparsegpt_ww(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0, prune_m=0):
+    prune_wanda(args, model, tokenizer, device, ratios=all_layer_ratio, processor=processor)
+
+def prune_sparsegpt_ww(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0, prune_m=0, processor=None):
     s1 = 1.0 - args.epsilon
     s2 = 1.0 + args.epsilon
 
     all_layer_ratio = ww_sparsity(args, model, device, s1, s2)
     # sparsegpt pruning
-    prune_sparsegpt(args, model, tokenizer, device, ratios=all_layer_ratio)
+    prune_sparsegpt(args, model, tokenizer, device, ratios=all_layer_ratio, processor=processor)
