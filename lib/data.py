@@ -5,15 +5,18 @@ import random
 import torch
 from datasets import load_dataset
 
+
 # Set seed for reproducibility
 def set_seed(seed):
     np.random.seed(seed)
     torch.random.manual_seed(seed)
 
+
 # Wrapper for tokenized input IDs
 class TokenizerWrapper:
     def __init__(self, input_ids):
         self.input_ids = input_ids
+
 
 # Load and process wikitext2 dataset
 def get_wikitext2(nsamples, seed, seqlen, tokenizer):
@@ -37,14 +40,15 @@ def get_wikitext2(nsamples, seed, seqlen, tokenizer):
         trainloader.append((inp, tar))
     return trainloader, testenc
 
+
 # Load and process c4 dataset
 def get_c4(nsamples, seed, seqlen, tokenizer):
     # Load train and validation datasets
     traindata = load_dataset(
-    'allenai/c4', data_files={'train': 'en/c4-train.00000-of-01024.json.gz'}, split='train'
+        'allenai/c4', data_files={'train': 'en/c4-train.00000-of-01024.json.gz'}, split='train'
     )
     valdata = load_dataset(
-    'allenai/c4', data_files={'validation': 'en/c4-validation.00000-of-00008.json.gz'}, split='validation'
+        'allenai/c4', data_files={'validation': 'en/c4-validation.00000-of-00008.json.gz'}, split='validation'
     )
 
     # Generate samples from training set
@@ -69,9 +73,41 @@ def get_c4(nsamples, seed, seqlen, tokenizer):
     valenc = TokenizerWrapper(valenc)
     return trainloader, valenc
 
+
+def get_pokemon_blip_captions(nsamples, seed, seqlen, processor):
+    """Calibration loader for the multi-modal BLIP captions over Pokémon images."""
+    if processor is None:
+        raise ValueError("A processor must be provided for multi-modal calibration data.")
+
+    dataset = load_dataset("lambdalabs/pokemon-blip-captions", split="train")
+    random.seed(seed)
+    trainloader = []
+
+    for _ in range(nsamples):
+        idx = random.randint(0, len(dataset) - 1)
+        sample = dataset[idx]
+        image = sample["image"].convert("RGB")
+        caption = sample["text"]
+        processed = processor(text=caption, images=image, return_tensors="pt")
+        input_ids = processed["input_ids"][:, :seqlen]
+        attention_mask = processed["attention_mask"][:, :seqlen]
+        entry = {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "pixel_values": processed.get("pixel_values"),
+        }
+        trainloader.append(entry)
+
+    # Multimodal datasets are used only for calibration, so we do not build a test set
+    return trainloader, None
+
+
 # Function to select the appropriate loader based on dataset name
-def get_loaders(name, nsamples=128, seed=0, seqlen=2048, tokenizer=None):
+def get_loaders(name, nsamples=128, seed=0, seqlen=2048, tokenizer=None, processor=None):
     if 'wikitext2' in name:
         return get_wikitext2(nsamples, seed, seqlen, tokenizer)
     if "c4" in name:
         return get_c4(nsamples, seed, seqlen, tokenizer)
+    if "pokemon_blip_captions" in name:
+        return get_pokemon_blip_captions(nsamples, seed, seqlen, processor)
+    raise ValueError(f"Unknown dataset {name}")

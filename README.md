@@ -38,6 +38,21 @@ python  main.py \
     --ww_metric_cache ./data/llama2-7b-hf/ \
     --epsilon 0.3
 ```
+
+### Qwen2.5-VL-3B support
+To prune the multi-modal Qwen2.5-VL-3B model, AlphaPruning now understands Hugging Face vision-language processors and uses the Pokémon BLIP captions dataset for calibration by default.
+
+```sh
+python main.py \
+    --model Qwen/Qwen2.5-VL-3B-Instruct \
+    --cache_dir llm_weights/ \
+    --prune_method wanda \
+    --sparsity_ratio 0.5 \
+    --calib_dataset pokemon_blip_captions \
+    --save results/qwen2_5_vl/
+```
+
+The `--calib_dataset` flag controls the dataset used to build calibration batches and now accepts `pokemon_blip_captions` for multi-modal pruning, in addition to the existing `c4` text-only option.
 We provide a quick overview of the arguments:  
 - `--model`: The identifier for the LLaMA model on the Hugging Face model hub.
 - `--cache_dir`: Directory for loading or storing LLM weights. The default is `llm_weights`.
